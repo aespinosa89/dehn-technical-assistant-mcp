@@ -190,3 +190,160 @@ def delete_collection(name: str) -> bool:
         logger.error(f"Error deleting collection {name}: {e}")
         conn.close()
         return False
+
+# Document management functions
+async def add_document(
+    content: str,
+    collection: str = DEFAULT_COLLECTION,
+    metadata: Optional[Dict[str, Any]] = None,
+    document_id: Optional[str] = None
+) -> Optional[str]:
+    """Add a document to a collection"""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    
+    try:
+        # Check if collection exists
+        cursor.execute('SELECT dimension FROM collections WHERE name = ?', (collection,))
+        result = cursor.fetchone()
+        if not result:
+            conn.close()
+            return None
+        
+        dimension = result[0]
+        
+        # Generate embedding
+        embedding = await get_embedding(content)
+        
+        # Ensure embedding dimension matches collection
+        if len(embedding) != dimension:
+            logger.error(f"Embedding dimension {len(embedding)} doesn't match collection dimension {dimension}")
+            conn.close()
+            return None
+        
+        # Generate ID if not provided
+        if not document_id:
+            document_id = hashlib.md5(f"{collection}:{content}:{time.time()}".encode()).hexdigest()
+        
+        # Store embedding as binary data
+        embedding_binary = np.array(embedding, dtype=np.float32).tobytes()
+        
+        # Add document
+        cursor.execute(
+            '''
+            INSERT OR REPLACE INTO documents (id, collection, content, metadata, embedding, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ''',
+            (document_id, collection, content, json.dumps(metadata or {}), embedding_binary, int(time.time()))
+        )
+        
+        conn.commit()
+        conn.close()
+        return document_id
+    except Exception as e:
+        logger.error(f"Error adding document: {e}")
+        conn.close()
+        return None
+
+def get_document(document_id: str) -> Optional[Dict[str, Any]]:
+    """Get a document by ID"""
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    
+    cursor.execute('SELECT id, collection, content, metadata, created_at FROM documents WHERE id = ?', (document_id,))
+    document = cursor.fetchone()
+    
+    if not document:
+        conn.close()
+        return None
+    
+    document_dict = dict(document)
+    document_dict['metadata'] = json.loads(document_dict['metadata'])
+    
+    conn.close()
+    return document_dict
+
+def delete_document(document_id: str) -> bool:
+    """Delete a document by ID"""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    
+    try:
+        cursor.execute('DELETE FROM documents WHERE id = ?', (document_id,))
+        deleted = cursor.rowcount > 0
+        
+        conn.commit()
+        conn.close()
+        return deleted
+    except Exception as e:
+        logger.error(f"Error deleting document {document_id}: {e}")
+        conn.close()
+        return False
+
+async def search_similar(
+    query: str,
+    collection: str = DEFAULT_COLLECTION,
+    limit: int = 5,
+    min_score: float = 0.7,
+    filter_metadata: Optional[Dict[str, Any]] = None
+) -> List[Dict[str, Any]]:
+    """Search for similar documents using vector similarity"""
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    
+    try:
+        # Check if collection exists
+        cursor.execute('SELECT dimension FROM collections WHERE name = ?', (collection,))
+        result = cursor.fetchone()
+        if not result:
+            conn.close()
+            return []
+        
+        # Generate query embedding
+        query_embedding = await get_embedding(query)
+        query_embedding_np = np.array(query_embedding)
+        
+        # Get all documents from the collection
+        cursor.execute('SELECT id, collection, content, metadata, embedding, created_at FROM documents WHERE collection = ?', (collection,))
+        documents = cursor.fetchall()
+        
+        # Calculate similarities and filter results
+        results = []
+        for doc in documents:
+            doc_dict = dict(doc)
+            doc_dict['metadata'] = json.loads(doc_dict['metadata'])
+            
+            # Check metadata filter if provided
+            if filter_metadata:
+                skip = False
+                for key, value in filter_metadata.items():
+                    if key not in doc_dict['metadata'] or doc_dict['metadata'][key] != value:
+                        skip = True
+                        break
+                if skip:
+                    continue
+            
+            # Get embedding from binary data
+            doc_embedding_binary = doc_dict.pop('embedding')
+            doc_embedding_np = np.frombuffer(doc_embedding_binary, dtype=np.float32)
+            
+            # Calculate similarity
+            similarity = cosine_similarity(query_embedding_np, doc_embedding_np)
+            
+            # Add to results if above threshold
+            if similarity >= min_score:
+                doc_dict['similarity'] = float(similarity)
+                results.append(doc_dict)
+        
+        # Sort by similarity (descending) and limit results
+        results.sort(key=lambda x: x['similarity'], reverse=True)
+        return results[:limit]
+    
+    except Exception as e:
+        logger.error(f"Error searching similar documents: {e}")
+        conn.close()
+        return []
+    finally:
+        conn.close()
