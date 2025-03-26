@@ -1,0 +1,124 @@
+version: '3.8'
+
+services:
+  # Backend API Service
+  backend:
+    build:
+      context: ./backend
+      dockerfile: ../docker/backend/Dockerfile
+    volumes:
+      - ./backend:/app
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=${DATABASE_URL}
+      - SUPABASE_URL=${SUPABASE_URL}
+      - SUPABASE_KEY=${SUPABASE_KEY}
+      - LLM_SERVER_URL=http://llm_server:8001
+    depends_on:
+      - llm_server
+
+  # LLM Server
+  llm_server:
+    build:
+      context: ./llm_server
+      dockerfile: ../docker/llm_server/Dockerfile
+    volumes:
+      - ./llm_server:/app
+      - ./llm_server/models:/app/models
+    ports:
+      - "8001:8001"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    environment:
+      - MODEL_PATH=/app/models/gemma-3-8b-instruct-4bit
+      - VLLM_GPU_MEMORY_UTILIZATION=0.9
+
+  # RAG Service
+  rag:
+    build:
+      context: ./rag
+      dockerfile: ../docker/rag/Dockerfile
+    volumes:
+      - ./rag:/app
+      - ./data:/app/data
+    ports:
+      - "8002:8002"
+    environment:
+      - DATABASE_URL=${DATABASE_URL}
+      - SUPABASE_URL=${SUPABASE_URL}
+      - SUPABASE_KEY=${SUPABASE_KEY}
+
+  # Frontend
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: ../docker/frontend/Dockerfile
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    ports:
+      - "3000:3000"
+    environment:
+      - VITE_BACKEND_URL=http://localhost:8000
+      - VITE_SUPABASE_URL=${SUPABASE_URL}
+      - VITE_SUPABASE_ANON_KEY=${SUPABASE_ANON_KEY}
+    depends_on:
+      - backend
+
+  # PostgreSQL MCP Server
+  postgres_mcp:
+    build:
+      context: ./mcp_servers/postgres
+      dockerfile: ../docker/mcp_servers/postgres/Dockerfile
+    volumes:
+      - ./mcp_servers/postgres:/app
+    ports:
+      - "8010:8010"
+    environment:
+      - DATABASE_URL=${DATABASE_URL}
+
+  # Vectorize MCP Server
+  vectorize_mcp:
+    build:
+      context: ./mcp_servers/vectorize
+      dockerfile: ../docker/mcp_servers/vectorize/Dockerfile
+    volumes:
+      - ./mcp_servers/vectorize:/app
+    ports:
+      - "8011:8011"
+    environment:
+      - DATABASE_URL=${DATABASE_URL}
+    depends_on:
+      - postgres_mcp
+
+  # Memory MCP Server
+  memory_mcp:
+    build:
+      context: ./mcp_servers/memory
+      dockerfile: ../docker/mcp_servers/memory/Dockerfile
+    volumes:
+      - ./mcp_servers/memory:/app
+    ports:
+      - "8012:8012"
+    environment:
+      - DATABASE_URL=${DATABASE_URL}
+    depends_on:
+      - postgres_mcp
+
+  # Brave Search MCP Server
+  brave_search_mcp:
+    build:
+      context: ./mcp_servers/brave_search
+      dockerfile: ../docker/mcp_servers/brave_search/Dockerfile
+    volumes:
+      - ./mcp_servers/brave_search:/app
+    ports:
+      - "8013:8013"
+    environment:
+      - BRAVE_API_KEY=${BRAVE_API_KEY}
